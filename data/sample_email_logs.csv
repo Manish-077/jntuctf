@@ -1,0 +1,5 @@
+login_time_delta_hours,location_distance_km,emails_per_hour,recipient_count,inbox_rule_changes,subject,body
+2,45,6,1,0,Weekly standup notes,Here are the notes from today.
+72,8900,90,40,3,URGENT wire instructions,Please send funds to the following account immediately.
+0.5,120,4,2,0,Invoice attached,Please find invoice #9921 attached.
+12,30,8,5,1,Forwarding rules updated,Your inbox rules were changed.

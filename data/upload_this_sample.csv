@@ -1,0 +1,10 @@
+login_time_delta_hours,location_distance_km,emails_per_hour,recipient_count,inbox_rule_changes,subject,body
+1,25,4,1,0,Team lunch tomorrow,See you at noon in the cafeteria.
+6,80,7,2,0,Q4 budget draft,Attached is the draft for review — no rush.
+48,9500,85,38,2,URGENT — wire transfer today,CFO asked me to route payment to new vendor account. Reply with confirmation.
+0.3,5200,12,1,1,Re: invoice,Please ignore previous email — use this account instead.
+3,40,5,3,0,Calendar invite,Accepted your meeting for Thursday.
+168,12000,120,50,4,Confidential — payment details,Kindly process attached wire to our escrow partner immediately.
+2,15,6,1,0,Weekly report,Numbers are in the spreadsheet link below.
+12,200,9,6,1,New forwarding rule,You added a rule to forward all mail to external address.
+72,600,45,15,0,Project update,Sharing status with the broader team.
