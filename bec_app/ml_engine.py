@@ -3,12 +3,36 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from bec_app.database import fetch_analyses
-from bec_app.model_service import score_row as _score_row
+from bec_app.model_service import score_row as _score_row, behavior_model_source
+from bec_app.phishing_model import phishing_probability
 
 
 def score_row(features: dict[str, float]) -> tuple[float, float]:
     return _score_row(features)
+
+
+def score_fused(
+    features: dict[str, float],
+    subject: str | None = None,
+    body: str | None = None,
+    phishing_weight: float = 0.42,
+) -> tuple[float, float, float | None, float, str]:
+    """
+    Returns: combined_risk, behavior_risk, phishing_prob | None, raw_if_score, behavior_source
+    """
+    br, raw = score_row(features)
+    src = behavior_model_source()
+    sub = subject or ""
+    bod = body or ""
+    pp = phishing_probability(sub, bod)
+    if pp is None:
+        return br, br, None, raw, src
+    w = float(np.clip(phishing_weight, 0.0, 0.95))
+    combined = (1.0 - w) * br + w * pp
+    return float(np.clip(combined, 0.0, 1.0)), br, pp, raw, src
 
 
 def threat_level(risk: float, threshold: float) -> str:
@@ -19,7 +43,11 @@ def threat_level(risk: float, threshold: float) -> str:
     return "Low"
 
 
-def detect_issues(features: dict[str, float], risk: float) -> list[dict[str, Any]]:
+def detect_issues(
+    features: dict[str, float],
+    risk: float,
+    phishing_prob: float | None = None,
+) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     if features.get("location_distance_km", 0) > 800:
         issues.append(
@@ -41,7 +69,7 @@ def detect_issues(features: dict[str, float], risk: float) -> list[dict[str, Any
         issues.append(
             {
                 "type": "Unusual sending volume",
-                "detail": f"~{features['emails_per_hour']:.0f} emails/hour — possible auto-forward or blast.",
+                "detail": f"~{features['emails_per_hour']:.0f} emails/hour - possible auto-forward or blast.",
                 "severity": "Medium",
             }
         )
@@ -59,8 +87,24 @@ def detect_issues(features: dict[str, float], risk: float) -> list[dict[str, Any
         issues.append(
             {
                 "type": "Mass recipients",
-                "detail": f"{int(features['recipient_count'])} recipients — review for BEC staging.",
+                "detail": f"{int(features['recipient_count'])} recipients - review for BEC staging.",
                 "severity": "Medium",
+            }
+        )
+    if phishing_prob is not None and phishing_prob >= 0.72:
+        issues.append(
+            {
+                "type": "Phishing / BEC language (benchmark classifier)",
+                "detail": f"Supervised head (Enron + phishing corpora): P(malicious)~{phishing_prob:.2f}.",
+                "severity": "High" if phishing_prob >= 0.88 else "Medium",
+            }
+        )
+    elif phishing_prob is not None and phishing_prob >= 0.55:
+        issues.append(
+            {
+                "type": "Elevated phishing score",
+                "detail": f"Text model score {phishing_prob:.2f} - review headers and sender policy.",
+                "severity": "Low",
             }
         )
     if risk >= 0.7 and not issues:

@@ -1,6 +1,6 @@
 # BEC Shield — Full-stack BEC detection platform
 
-Streamlit UI + SQLite + Isolation Forest + rule engine + optional FastAPI. Built for demos and hackathon judging: multi-source ingest, visual pipeline, alerts, and analytics dashboard.
+Streamlit UI + SQLite + **dual ML stack** (Isolation Forest on behavior + TF‑IDF/logistic regression on email text) + rule engine + optional FastAPI. Benchmark-ready for **Enron**, **phishing**, **CERT insider threat**, and **simulated M365/Gmail** logs (see `data/benchmarks/README.md`).
 
 ## Quick start (local)
 
@@ -10,7 +10,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open `http://localhost:8501`. Use the sidebar to move between Landing → Input → Processing → Results → Alerts → Dashboard → Admin.
+Open `http://localhost:8501`. Sidebar: Landing → Input → **Datasets / benchmarks** (train models, generate auth CSV) → Processing → Results → Alerts → Dashboard → Admin.
+
+Train benchmark models (writes `data/artifacts/*.joblib`):
+
+```bash
+python scripts/train_benchmark_models.py
+python scripts/generate_auth_logs.py --rows 500
+```
 
 **Sample CSV:** `data/sample_email_logs.csv`
 
@@ -22,7 +29,7 @@ uvicorn server:app --reload --port 8000
 ```
 
 - `GET /health`
-- `POST /analyze` — JSON body with `login_time_delta_hours`, `location_distance_km`, `emails_per_hour`, `recipient_count`, `inbox_rule_changes`, `subject_entropy`, `body_length_ratio`
+- `POST /analyze` — JSON with the seven numeric features plus optional `subject` / `body` for phishing-head fusion
 - `GET /alerts`
 
 ## Docker (UI only)
@@ -52,7 +59,7 @@ SQLite database is stored under `data/bec_platform.db` (persist the `data` direc
 
 - **Frontend:** Streamlit (`app.py`) with custom CSS and Plotly charts.
 - **Backend:** Python modules in `bec_app/` (database, features, ML).
-- **ML:** `IsolationForest` + `StandardScaler`, trained on synthetic normal vs. anomalous feature mixes; rule layer maps to BEC-style issues.
+- **ML:** (1) Behavior: `IsolationForest` + `StandardScaler` — default synthetic mix, or retrained on CERT + simulated auth CSV; (2) Text: `TfidfVectorizer` + `LogisticRegression` on Enron-style ham + phishing labels (toy CSVs included; swap for Kaggle dumps).
 - **Persistence:** SQLite (`analyses`, `alerts`, `users`, `settings`, `audit_log`).
 
 Replace synthetic training data with your historical SIEM/IdP exports for production use.

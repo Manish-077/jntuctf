@@ -5,9 +5,12 @@ Run: streamlit run app.py
 from __future__ import annotations
 
 import json
-import time
+import subprocess
+import sys
+import time as time_module  # not named `time`: `from datetime import time` would shadow and break .sleep()
 from datetime import date, datetime
 from datetime import time as dt_time
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -35,24 +38,12 @@ from bec_app.features import (
     manual_to_features,
     suggest_column_map,
 )
-from bec_app.ml_engine import dashboard_series, detect_issues, score_row, threat_level
+from bec_app.ml_engine import dashboard_series, detect_issues, score_fused, threat_level
+from bec_app.model_service import clear_behavior_cache
+from bec_app.phishing_model import clear_phishing_cache, get_phishing_pipeline
 from bec_app.ui.styles import inject_global_css, pipeline_html
 
-init_db()
-
-st.set_page_config(
-    page_title="BEC Shield | AI Detection",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-if "page" not in st.session_state:
-    st.session_state.page = "landing"
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-if "processing" not in st.session_state:
-    st.session_state.processing = False
+REPO_ROOT = Path(__file__).resolve().parent
 
 
 def nav_to(name: str) -> None:
@@ -68,6 +59,7 @@ def sidebar():
         for label, key in [
             ("🏠 Landing", "landing"),
             ("📥 Input hub", "input"),
+            ("📚 Datasets / benchmarks", "benchmarks"),
             ("⚙️ Processing", "processing"),
             ("📊 Results", "results"),
             ("🔔 Alerts", "alerts"),
@@ -77,27 +69,46 @@ def sidebar():
             if st.button(label, key=f"nav_{key}", use_container_width=True):
                 nav_to(key)
         st.divider()
-        st.caption("Isolation Forest · Rules · SQLite")
+        st.caption("IF · Phishing LR · Enron/CERT/sim benchmarks")
 
 
 def run_analysis(
     input_type: str,
     features: dict,
     raw_summary: str | None = None,
+    email_subject: str | None = None,
+    email_body: str | None = None,
 ) -> dict:
     threshold = float(get_setting("risk_threshold", "0.55"))
-    risk, raw_ml = score_row(features)
-    level = threat_level(risk, threshold)
-    issues = detect_issues(features, risk)
-    aid = insert_analysis(input_type, risk, level, issues, features, raw_summary)
+    combined, behavior_risk, phish_p, raw_ml, beh_src = score_fused(
+        features,
+        subject=email_subject,
+        body=email_body,
+    )
+    level = threat_level(combined, threshold)
+    issues = detect_issues(features, combined, phish_p)
+    aid = insert_analysis(input_type, combined, level, issues, features, raw_summary)
     if level == "High":
-        insert_alert("High", "High BEC risk detected", f"Score {risk:.2f} · {aid[:8]}…", aid)
+        insert_alert(
+            "High",
+            "High BEC risk detected",
+            f"Combined {combined:.2f} (behavior {behavior_risk:.2f}) · {aid[:8]}…",
+            aid,
+        )
     elif level == "Medium":
-        insert_alert("Medium", "Elevated BEC risk", f"Score {risk:.2f} · {aid[:8]}…", aid)
-    log_audit("analysis", f"{input_type} {aid[:8]} risk={risk:.2f}")
+        insert_alert(
+            "Medium",
+            "Elevated BEC risk",
+            f"Combined {combined:.2f} (behavior {behavior_risk:.2f}) · {aid[:8]}…",
+            aid,
+        )
+    log_audit("analysis", f"{input_type} {aid[:8]} combined={combined:.2f}")
     return {
         "analysis_id": aid,
-        "risk": risk,
+        "risk": combined,
+        "behavior_risk": behavior_risk,
+        "phishing_prob": phish_p,
+        "behavior_source": beh_src,
         "raw_ml": raw_ml,
         "level": level,
         "issues": issues,
@@ -124,7 +135,9 @@ def page_landing():
     st.markdown("---")
     fc1, fc2, fc3 = st.columns(3)
     with fc1:
-        st.markdown("**🤖 AI detection**  \nIsolation Forest + rule engine")
+        st.markdown(
+            "**🤖 AI detection**  \nIF on auth/behavior + TF‑IDF/LR (Enron + phishing corpora)"
+        )
     with fc2:
         st.markdown("**⚡ Real-time alerts**  \nSeverity + triage actions")
     with fc3:
@@ -200,7 +213,20 @@ def page_input():
                     features_out = csv_row_to_features(row, cmap2)
                     meta_type = "csv"
                     raw_summary = f"CSV rows={len(df)}, row_index={row_idx}"
-                    st.session_state.pending = (meta_type, features_out, raw_summary)
+                    subj_txt, body_txt = "", ""
+                    if "subject" in cmap2:
+                        v = row[cmap2["subject"]]
+                        subj_txt = "" if pd.isna(v) else str(v)
+                    if "body" in cmap2:
+                        v = row[cmap2["body"]]
+                        body_txt = "" if pd.isna(v) else str(v)
+                    st.session_state.pending = (
+                        meta_type,
+                        features_out,
+                        raw_summary,
+                        subj_txt,
+                        body_txt,
+                    )
                     st.success(f"Row {row_idx} queued — open **Processing**.")
 
     with tab_api:
@@ -224,7 +250,24 @@ def page_input():
                     features_out = api_payload_to_features(payload)
                     meta_type = "api"
                     raw_summary = jtxt[:500]
-                    st.session_state.pending = (meta_type, features_out, raw_summary)
+                    subj = str(
+                        payload.get("subject")
+                        or payload.get("email_subject")
+                        or ""
+                    )
+                    bod = str(
+                        payload.get("body")
+                        or payload.get("content")
+                        or payload.get("email_body")
+                        or ""
+                    )
+                    st.session_state.pending = (
+                        meta_type,
+                        features_out,
+                        raw_summary,
+                        subj,
+                        bod,
+                    )
                     st.success("Payload queued — go to **Processing** to run the pipeline.")
             except json.JSONDecodeError as e:
                 st.error(f"Invalid JSON: {e}")
@@ -273,43 +316,141 @@ def page_input():
             )
             meta_type = "manual"
             raw_summary = f"{sender} → {receiver}: {subject}"
-            st.session_state.pending = (meta_type, features_out, raw_summary)
+            st.session_state.pending = (
+                meta_type,
+                features_out,
+                raw_summary,
+                subject,
+                body,
+            )
             st.success("Queued — open **Processing** to run ML + rules.")
 
     if st.session_state.get("pending"):
         st.info("You have a queued analysis. Switch to **Processing** in the sidebar.")
 
 
+def page_benchmarks():
+    st.header("Datasets & benchmarks")
+    st.markdown(
+        "Hackathon stack: **Enron** (normal mail), **phishing** (labeled), "
+        "**CERT insider threat** (logon behavior), **simulated M365/Gmail** logs. "
+        "Place full Kaggle/CERT exports under `data/external/` and read `data/benchmarks/README.md`."
+    )
+    bcol1, bcol2 = st.columns(2)
+    with bcol1:
+        st.subheader("Model status")
+        pipe = get_phishing_pipeline()
+        st.write(
+            "- **Phishing / BEC text head (TF‑IDF + LR):** "
+            + ("✅ loaded" if pipe is not None else "⚪ not trained — run CLI below")
+        )
+        try:
+            from bec_app.model_service import get_model_bundle
+
+            _s, _c, src = get_model_bundle()
+            st.write(f"- **Behavior Isolation Forest:** source = **{src}**")
+        except Exception as e:
+            st.write(f"- **Behavior IF:** error {e}")
+    with bcol2:
+        st.subheader("Reload caches")
+        if st.button("Clear model caches (after training)"):
+            clear_behavior_cache()
+            clear_phishing_cache()
+            st.success("Done. Next analysis loads fresh `data/artifacts/*.joblib` files.")
+
+    st.subheader("Train on your downloads")
+    st.code(
+        "python scripts/train_benchmark_models.py\n"
+        "# With Kaggle / CERT files:\n"
+        "python scripts/train_benchmark_models.py "
+        "--enron data/external/enron.csv --phishing data/external/phish.csv "
+        "--cert-logon data/external/logon.csv --sim-auth data/generated/sim_m365_gmail_auth.csv",
+        language="bash",
+    )
+    if st.button("Run training now (toy Enron+phish + synthetic IF)"):
+        with st.spinner("Training…"):
+            r = subprocess.run(
+                [sys.executable, str(REPO_ROOT / "scripts" / "train_benchmark_models.py")],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        st.text(r.stdout + (r.stderr or ""))
+        if r.returncode == 0:
+            clear_behavior_cache()
+            clear_phishing_cache()
+            st.success("Artifacts written to data/artifacts/. Caches cleared.")
+        else:
+            st.error(f"Exit code {r.returncode}")
+
+    st.subheader("Simulated Microsoft 365 / Gmail auth logs")
+    st.caption("Generates structured CSV aligned with the same 7 features as the app.")
+    if st.button("Generate CSV (300 rows, default path)"):
+        r = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "generate_auth_logs.py")],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        st.text(r.stdout + (r.stderr or ""))
+        p = REPO_ROOT / "data" / "generated" / "sim_m365_gmail_auth.csv"
+        if p.exists():
+            st.download_button(
+                label="Download sim_m365_gmail_auth.csv",
+                data=p.read_bytes(),
+                file_name="sim_m365_gmail_auth.csv",
+                mime="text/csv",
+            )
+
+
+def _normalize_pending(p):
+    if p is None:
+        return None
+    if len(p) == 5:
+        return p
+    if len(p) == 3:
+        return (*p, "", "")
+    return (*p[:3], "", "")
+
+
 def page_processing():
     st.header("Processing pipeline")
     st.markdown(pipeline_html(), unsafe_allow_html=True)
-    pending = st.session_state.get("pending")
+    pending = _normalize_pending(st.session_state.get("pending"))
     if not pending:
         st.warning("No data queued. Use **Input hub** first.")
         return
-    meta_type, feats, raw = pending
+    meta_type, feats, raw, em_sub, em_body = pending
     if st.button("▶ Run pipeline", type="primary"):
         status = st.empty()
         prog = st.progress(0)
         status.caption("Data input")
-        time.sleep(0.35)
+        time_module.sleep(0.35)
         prog.progress(20)
         status.caption("Preprocessing")
-        time.sleep(0.35)
+        time_module.sleep(0.35)
         prog.progress(45)
         status.caption("Rule engine")
-        time.sleep(0.35)
+        time_module.sleep(0.35)
         prog.progress(70)
         status.caption("ML — Isolation Forest")
-        time.sleep(0.45)
+        time_module.sleep(0.45)
         prog.progress(90)
         status.caption("Risk scoring")
-        res = run_analysis(meta_type, feats, raw)
+        res = run_analysis(
+            meta_type,
+            feats,
+            raw,
+            email_subject=em_sub or None,
+            email_body=em_body or None,
+        )
         prog.progress(100)
         status.caption("Done")
         st.session_state.last_result = res
         st.session_state.pop("pending", None)
-        time.sleep(0.2)
+        time_module.sleep(0.2)
         nav_to("results")
     with st.expander("Feature vector (debug)"):
         st.json(feats)
@@ -322,6 +463,19 @@ def page_results():
         st.info("Run an analysis from **Input** → **Processing**.")
         return
     risk_pct = r["risk"] * 100
+    br = r.get("behavior_risk")
+    pp = r.get("phishing_prob")
+    bsrc = r.get("behavior_source", "")
+    if br is not None and pp is not None:
+        st.caption(
+            f"**Fused score** — behavior IF ({bsrc}): {br * 100:.1f} · "
+            f"phishing LR: {pp * 100:.1f} → combined {risk_pct:.1f}"
+        )
+    elif br is not None:
+        msg = f"Behavior IF ({bsrc}): {br * 100:.1f}."
+        if pp is None:
+            msg += " Train phishing head under **Datasets / benchmarks** for text fusion."
+        st.caption(msg)
     col1, col2, col3 = st.columns([1, 1, 2])
     with col1:
         color = "#22c55e" if r["level"] == "Low" else "#eab308" if r["level"] == "Medium" else "#ef4444"
@@ -569,6 +723,19 @@ def page_admin():
 
 
 def main():
+    st.set_page_config(
+        page_title="BEC Shield | AI Detection",
+        page_icon="🛡️",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    init_db()
+    if "page" not in st.session_state:
+        st.session_state.page = "landing"
+    if "last_result" not in st.session_state:
+        st.session_state.last_result = None
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
     st.markdown(inject_global_css(), unsafe_allow_html=True)
     sidebar()
     page = st.session_state.page
@@ -576,6 +743,8 @@ def main():
         page_landing()
     elif page == "input":
         page_input()
+    elif page == "benchmarks":
+        page_benchmarks()
     elif page == "processing":
         page_processing()
     elif page == "results":
@@ -592,4 +761,6 @@ def main():
     )
 
 
-main()
+# Streamlit runs this file as __main__; guard avoids running the UI on `import app`.
+if __name__ == "__main__":
+    main()

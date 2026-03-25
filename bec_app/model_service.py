@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import functools
 
+import joblib
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
-from bec_app.config import FEATURE_NAMES
+from bec_app.config import ARTIFACTS_DIR, FEATURE_NAMES
+
+_BEHAVIOR_PATH = ARTIFACTS_DIR / "behavior_if.joblib"
 
 
 def _synthetic_normal(n: int = 400, seed: int = 42) -> np.ndarray:
@@ -41,6 +44,9 @@ def _synthetic_anomalies(n: int = 40, seed: int = 7) -> np.ndarray:
 
 @functools.lru_cache(maxsize=1)
 def get_model_bundle():
+    if _BEHAVIOR_PATH.exists():
+        bundle = joblib.load(_BEHAVIOR_PATH)
+        return bundle["scaler"], bundle["clf"], "benchmarks"
     X = np.vstack([_synthetic_normal(450), _synthetic_anomalies(50)])
     scaler = StandardScaler()
     Xs = scaler.fit_transform(X)
@@ -51,7 +57,15 @@ def get_model_bundle():
         n_jobs=-1,
     )
     clf.fit(Xs)
-    return scaler, clf
+    return scaler, clf, "synthetic"
+
+
+def clear_behavior_cache() -> None:
+    get_model_bundle.cache_clear()
+
+
+def behavior_model_source() -> str:
+    return get_model_bundle()[2]
 
 
 def vector_from_features(features: dict[str, float]) -> np.ndarray:
@@ -69,7 +83,7 @@ def vector_from_features(features: dict[str, float]) -> np.ndarray:
 
 
 def score_row(features: dict[str, float]) -> tuple[float, float]:
-    scaler, clf = get_model_bundle()
+    scaler, clf, _src = get_model_bundle()
     x = vector_from_features(features)
     xs = scaler.transform(x)
     raw = float(-clf.score_samples(xs)[0])

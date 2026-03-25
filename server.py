@@ -22,7 +22,7 @@ from bec_app.database import (
     insert_analysis,
 )
 from bec_app.features import api_payload_to_features
-from bec_app.ml_engine import detect_issues, score_row, threat_level
+from bec_app.ml_engine import detect_issues, score_fused, threat_level
 
 init_db()
 
@@ -45,6 +45,8 @@ class AnalyzeBody(BaseModel):
     subject_entropy: float = Field(default=3.5)
     body_length_ratio: float = Field(default=1.2)
     input_type: str = "api"
+    subject: str = ""
+    body: str = ""
 
 
 @app.get("/health")
@@ -57,29 +59,32 @@ def analyze(body: AnalyzeBody):
     threshold = float(get_setting("risk_threshold", "0.55"))
     d = body.model_dump() if hasattr(body, "model_dump") else body.dict()
     d.pop("input_type", None)
+    sub, bod = d.pop("subject", "") or "", d.pop("body", "") or ""
     feats = api_payload_to_features(d)
-    risk, _raw = score_row(feats)
-    level = threat_level(risk, threshold)
-    issues = detect_issues(feats, risk)
+    combined, br, pp, _raw, _src = score_fused(feats, subject=sub, body=bod)
+    level = threat_level(combined, threshold)
+    issues = detect_issues(feats, combined, pp)
     aid = insert_analysis(
         "api",
-        risk,
+        combined,
         level,
         issues,
         feats,
-        json.dumps(body.model_dump()),
+        json.dumps(body.model_dump() if hasattr(body, "model_dump") else body.dict()),
     )
     if level in ("Medium", "High"):
         insert_alert(
             "High" if level == "High" else "Medium",
             f"BEC risk {level}",
-            f"Analysis {aid[:8]}… score {risk:.2f}",
+            f"Analysis {aid[:8]}… combined {combined:.2f}",
             aid,
         )
     return {
         "analysis_id": aid,
-        "risk_score": risk,
-        "risk_percent": round(risk * 100, 1),
+        "risk_score": combined,
+        "behavior_risk": br,
+        "phishing_probability": pp,
+        "risk_percent": round(combined * 100, 1),
         "threat_level": level,
         "issues": issues,
         "features": feats,

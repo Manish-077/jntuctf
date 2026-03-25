@@ -70,7 +70,8 @@ def pipeline_html() -> str:
         "Preprocessing",
         "Rule engine",
         "ML (Isolation Forest)",
-        "Risk scoring",
+        "Text (TF‑IDF · Enron+phish)",
+        "Risk fusion",
     ]
     inner = ""
     for i, s in enumerate(steps):

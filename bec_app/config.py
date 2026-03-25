@@ -2,7 +2,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
+ARTIFACTS_DIR = DATA_DIR / "artifacts"
 DB_PATH = DATA_DIR / "bec_platform.db"
+
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 FEATURE_NAMES = [
     "login_time_delta_hours",
